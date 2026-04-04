@@ -46,7 +46,7 @@ jobs:
           cat > "${BUILD_DIR}/manifest.json" <<EOF
           {
             "version": "${{ steps.version.outputs.version }}",
-            "firmware_url": "https://YOUR-OTA-SERVER/firmware-${{ steps.version.outputs.version }}.bin"
+            "firmware_url": "https://192.168.3.125/firmware-${{ steps.version.outputs.version }}.bin"
           }
           EOF
 
