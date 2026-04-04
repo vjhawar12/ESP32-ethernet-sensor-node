@@ -7,8 +7,8 @@ on:
 
 jobs:
   build-and-package:
-    runs-on: self-hosted
-
+    runs-on: ubuntu-latest
+    
     permissions:
       contents: read
 
