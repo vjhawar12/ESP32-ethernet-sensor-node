@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "board.c" "main.c" "s3.c"
+    SRCS "main.c" "s3.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES "cert.pem"
     PRIV_REQUIRES  esp_https_ota app_update
