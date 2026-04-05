@@ -27,6 +27,7 @@
 #include "esp_ota_ops.h"
 #include "esp_app_desc.h"
 #include "driver/gptimer.h"
+#include "stdbool.h"
 
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include "esp_crt_bundle.h"
