@@ -1,3 +1,4 @@
+#include "stdbool.h"
 #include "s3.h"
 // #include "eth01.c"
 
