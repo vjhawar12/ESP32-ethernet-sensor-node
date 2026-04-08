@@ -1,0 +1,35 @@
+name: CI Build ESP-IDF
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - replacement
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build firmware with ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.3
+          target: esp32s3
+          path: '.'
+          command: |
+            idf.py build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32s3-build
+          path: |
+            build/*.bin
+            build/*.elf
+            build/*.map
+            build/flasher_args.json

@@ -40,7 +40,6 @@
 #define IP_ADDR_11 "192.168.3.215"
 #define IP_ADDR_12 "192.168.3.216"
 #define IP_ADDR_13 "192.168.3.221"
-#define IP_ADDR_13 "192.168.3.222"
 
 #define SUBNET "255.255.255.0"
 #define GATEWAY "192.168.3.1"
@@ -177,7 +176,6 @@ static esp_err_t eth01_assign_static_ip(const char* ip_addr) {
 
 	printf("Success to set static ip: %s, netmask: %s, gw: %s", ip_addr, SUBNET, GATEWAY);
 
-#define IP_ADDR_12 "192.168.3.216"
     return ESP_OK;
 }
 
