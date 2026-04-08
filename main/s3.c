@@ -68,7 +68,7 @@
 #define IP_ADDR_6 "192.168.3.206"
 // this is not a real node, its a test one
 #define DEFAULT_IP_ADDR IP_ADDR_6
-#define MANIFEST "https://192.168.3.125:4443/manifest.json"
+#define MANIFEST "https://192.168.3.125:4443/s3_manifest.json"
 #define SUBNET "255.255.255.0"
 #define GATEWAY "192.168.3.1"
 // port for udp server

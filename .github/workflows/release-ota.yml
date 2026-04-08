@@ -45,13 +45,14 @@ jobs:
           cp "${BUILD_DIR}/${PROJECT_NAME}.bin" \
              "${RELEASE_DIR}/firmware-${{ steps.version.outputs.version }}.bin"
 
-      - name: Generate manifest.json
+      - name: Generate s3_manifest.json
         run: |
-          cat > "${RELEASE_DIR}/manifest.json" <<EOF
+          cat > "${RELEASE_DIR}/s3_manifest.json" <<EOF
           {
             "version": "${{ steps.version.outputs.version }}",
-            "firmware_url": "https://192.168.3.125:4443/firmware-${{ steps.version.outputs.version }}.bin"
-            "target": "esp32s3"
+            "firmware_url": "https://192.168.3.125:4443/firmware-${{ steps.version.outputs.version }}.bin",
+            "target": "esp32s3",
+            "flash_size_MB": "16",
           }
           EOF
 
