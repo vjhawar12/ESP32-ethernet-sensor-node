@@ -90,6 +90,17 @@ spi_device_handle_t spi_handle = NULL;
 static EventGroupHandle_t log_group, main_group; 
 int manifest_overflow = 0;
 
+void strfilter(char* buffer, int length) {
+	int i = 0;
+	while (i < length && buffer[i] != 0) {
+		if (buffer[i] == '\r' || buffer[i] == '\n') {
+			buffer[i] = 0;
+			break;
+		}
+		i++;
+	}
+}
+
 esp_err_t network_init(void) {
 	ESP_RETURN_ON_ERROR(esp_netif_init(), S3_TAG, "esp_netif failed"); // connects TCP/IP stack to the hardware
 	ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), S3_TAG, "esp_event_loop_create_default failed"); // event loop that reports link status and network changes, not packet transmission	
@@ -482,7 +493,7 @@ void udp_server_create(void* pv_params) {
 				ESP_LOGW(S3_TAG, "Rejected UDP from %s", addr_str);
 				continue;
 			}
-			strfilter(rx_buffer, sizeof(rx_buffer));
+			strfilter(rx_buffer, 128);
 			// returns 0 = match
 			if (!strcmp(rx_buffer, "OTA_REQUESTED")) {
 				ESP_LOGI(S3_TAG, "Accepted OTA trigger from %s", addr_str);
@@ -522,23 +533,12 @@ void tx(const char* message, int sock) {
 	}
 }
 
-void strfilter(char* buffer, int length) {
-	int i = 0;
-	while (i < length && buffer[i] != 0) {
-		if (buffer[i] == '\r' || buffer[i] == '\n') {
-			buffer[i] = 0;
-			break;
-		}
-		i++;
-	}
-}
-
 void handle_exit(char* tx_buffer, int sock) {
 	tx("Session terminated\n", sock);
 }
 
 void handle_help(char* tx_buffer, int sock) {
-	tx("Options:\nchip\nmem\nsha\n", sock);
+	tx("Options:\nchip\nmem\nsha\nfirmvers\n", sock);
 }
 
 void handle_chip(char* tx_buffer, int sock) {

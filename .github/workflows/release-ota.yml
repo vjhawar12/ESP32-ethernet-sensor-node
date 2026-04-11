@@ -53,7 +53,7 @@ jobs:
             "firmware_url": "https://192.168.3.125:4443/firmware-${{ steps.version.outputs.version }}.bin",
             "target": "esp32s3",
             "flash_size_MB": "16",
-            "commit_version" : "${{ github.sha }}",
+            "commit_version" : "${{ github.sha }}"
           }
           EOF
 
