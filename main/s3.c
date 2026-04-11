@@ -453,7 +453,7 @@ void udp_server_create(void* pv_params) {
 			close(sock);
 			continue;
         }
-        ESP_LOGI(TAG, "Socket bound, port %d", PORT_UDP);
+        ESP_LOGI(TAG, "UDP Socket bound, port %d", PORT_UDP);
 		struct sockaddr_storage source_addr; 
 		socklen_t socklen = sizeof(source_addr);
 		struct in_addr expected_addr;
@@ -479,10 +479,13 @@ void udp_server_create(void* pv_params) {
 			}
 			uint32_t actual_ip = ((struct sockaddr_in *)&source_addr)->sin_addr.s_addr;
 			if (!parse_successful || actual_ip != expected_addr.s_addr) {
+				ESP_LOGW(S3_TAG, "Rejected UDP from %s", addr_str);
 				continue;
 			}
+			strfilter(rx_buffer, sizeof(rx_buffer));
 			// returns 0 = match
 			if (!strcmp(rx_buffer, "OTA_REQUESTED")) {
+				ESP_LOGI(S3_TAG, "Accepted OTA trigger from %s", addr_str);
 				xEventGroupSetBits(main_group, OTA_REQUESTED_BIT); 
 			}
 		}
@@ -638,7 +641,7 @@ void tcp_server_create(void* pv_params) {
 		return;
     }
 	while (1) {
-		ESP_LOGI(TAG, "Socket listening");
+		ESP_LOGI(TAG, "TCP Socket bound and listening on port %d", PORT_TCP);
 		struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
         socklen_t addr_len = sizeof(source_addr);
 		// accept incoming connection on a new socket used for communication
@@ -736,7 +739,7 @@ void s3_main(void) {
 		portMAX_DELAY
 	); 
 	timer_setup();
-	xTaskCreate(heartbeat, "Heartbeat Monitor Task", 1024, NULL, 3, NULL); 
+	xTaskCreate(heartbeat, "Heartbeat Monitor Task", 4096, NULL, 3, NULL); 
 	xTaskCreate(udp_server_create, "UDP Server Task", 4096, (void *)AF_INET, 5, NULL); 	
 	xTaskCreate(tcp_server_create, "TCP Server Task", 4096, (void *)AF_INET, 5, NULL); 	
 	while (1) {
@@ -747,6 +750,7 @@ void s3_main(void) {
 			pdTRUE,
 			portMAX_DELAY
 		);
+		ESP_LOGI(S3_TAG, "OTA request bit received in main loop");
 		if (http_get_request() != ESP_OK) {
 			continue;
 		}		
