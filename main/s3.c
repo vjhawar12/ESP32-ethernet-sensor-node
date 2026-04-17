@@ -208,7 +208,6 @@ esp_err_t assign_static_ip(const char* ip_addr) {
     return ESP_OK;
 }
 
-
 // connecting the drivers and the network
 esp_err_t attach_driver_to_network(const char* ip_addr) {
 	// starting handler to catch errors
@@ -725,7 +724,7 @@ void network_start(void) {
 }
 
 void s3_main(void) {   
-	ESP_LOGI(S3_TAG, "s3_main started");
+	ESP_LOGW(S3_TAG, "s3_main started");
 	main_group = xEventGroupCreate();
 	log_group = xEventGroupCreate();
 	load_ip(); 
@@ -750,7 +749,7 @@ void s3_main(void) {
 			pdTRUE,
 			portMAX_DELAY
 		);
-		ESP_LOGI(S3_TAG, "OTA request bit received in main loop");
+		ESP_LOGW(S3_TAG, "OTA request bit received in main loop");
 		if (http_get_request() != ESP_OK) {
 			continue;
 		}		
