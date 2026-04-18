@@ -113,7 +113,7 @@ typedef struct stream_payload {
 	stream_data* _stream_data;
 	int sock;
 	struct sockaddr_in dest_addr;
-	char msg[128];
+	char msg[256];
 } stream_payload;
 stream_payload* payload;
 
@@ -656,7 +656,7 @@ void handle_stream_off(char* tx_buffer, int sock) {
 }
 
 void handle_ota_check(char* tx_buffer, int sock) {
-	snprintf(tx_buffer, 128, "Latest Version: %s\nRunning Version: %s\nLast time ota triggered: %s\n", server_version_str, esp_app_get_description()->version, "NULL");
+	snprintf(tx_buffer, 256, "Latest Version: %s\nRunning Version: %s\nLast time ota triggered: %s\n", server_version_str, esp_app_get_description()->version, "NULL");
 	tx(tx_buffer, sock);
 }
 
@@ -670,8 +670,8 @@ void handle_invalid(char* tx_buffer, int sock) {
 }
 
 void communicate(int sock) {
-	char rx_buffer[128];
-	char tx_buffer[128];
+	char rx_buffer[256];
+	char tx_buffer[256];
 	int status;
 	int exit = 0;
 	strncpy(tx_buffer, "ESP32 Node Console\nType 'help' for commands\nType 'exit' to terminate the session\n", sizeof(tx_buffer) - 1);
