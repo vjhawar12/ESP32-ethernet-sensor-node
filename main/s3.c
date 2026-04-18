@@ -113,7 +113,7 @@ typedef struct stream_payload {
 	stream_data* _stream_data;
 	int sock;
 	struct sockaddr_in dest_addr;
-	char msg[256];
+	char msg[512];
 } stream_payload;
 stream_payload* payload;
 
