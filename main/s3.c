@@ -35,11 +35,15 @@
 #include "esp_crt_bundle.h"
 #endif
 #include "cJSON.h"
+#include "freertos/semphr.h"
 // Exceeding around 1024 causes stack overflow
 #define MAX_HTTP_OUTPUT_BUFFER 1024
 #define ETH_CONNECTED_BIT BIT0
 #define OTA_REQUESTED_BIT BIT1
 #define HEARTBEAT_BIT BIT2
+#define STREAM_BIT BIT3
+#define STREAM_BIT_MANUAL BIT4
+#define MEASURE_ALL_BIT BIT0
 // NOTE: These constants are specific to the ESP32-S3-ETH boards. They use the following schematic: 
 // https://files.waveshare.com/wiki/ESP32-S3-ETH/ESP32-S3-ETH-Schematic.pdf
 #define S3_RESET_GPIO 9
@@ -50,6 +54,10 @@
 #define S3_CS_GPIO 14
 // 300000000ULL = 5 minutes
 #define HEARTBEAT_PERIOD_US 300000000ULL
+// 5000000ULL = 5 seconds
+#define STREAM_PERIOD_US 5000000ULL
+// 1000000ULL = 1 second
+#define DATA_PERIOD_US 1000000ULL
 // not needed, so assigning it a default value
 #define S3_ETH_PHY_ADDR 1
 // conservative speed
@@ -87,8 +95,27 @@ esp_eth_phy_t *phy = NULL;
 esp_netif_t *eth_netif = NULL;
 esp_eth_handle_t eth_handle = NULL;
 spi_device_handle_t spi_handle = NULL;
-static EventGroupHandle_t log_group, main_group; 
+SemaphoreHandle_t mutex;
+static EventGroupHandle_t log_group, main_group, collect_group; 
 int manifest_overflow = 0;
+typedef struct stream_data {
+	char chip[16];
+	char firmvers[16];
+	char ip[16];
+	char temperature[16];
+	char humidity[16];
+	char pressure[16];
+	char air_quality[16];
+	bool motion_detected;
+} stream_data; 
+stream_data* sensor_data;
+typedef struct stream_payload {
+	stream_data* _stream_data;
+	int sock;
+	struct sockaddr_in dest_addr;
+	char msg[128];
+} stream_payload;
+stream_payload* payload;
 
 void strfilter(char* buffer, int length) {
 	int i = 0;
@@ -395,7 +422,7 @@ void parse_manifest(void) {
 	cJSON_Delete(json);
 }
 
-static bool IRAM_ATTR timer_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* usr_ctx) {
+static bool IRAM_ATTR timer_heartbeat_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* usr_ctx) {
 	BaseType_t xHigherPriorityTaskWoken, xResult;
     xHigherPriorityTaskWoken = pdFALSE; // ensures the scheduler does not preempt this ISR
 	xEventGroupSetBitsFromISR(log_group, HEARTBEAT_BIT, &xHigherPriorityTaskWoken);
@@ -405,26 +432,86 @@ static bool IRAM_ATTR timer_callback(gptimer_handle_t timer, const gptimer_alarm
 	return false;
 }
 
+static bool IRAM_ATTR timer_stream_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* usr_ctx) {
+	BaseType_t xHigherPriorityTaskWoken, xResult;
+    xHigherPriorityTaskWoken = pdFALSE; // ensures the scheduler does not preempt this ISR
+	xEventGroupSetBitsFromISR(log_group, STREAM_BIT, &xHigherPriorityTaskWoken);
+	if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR(); // yields only after the ISR is finished
+    }
+	return false;
+}
+
+static bool IRAM_ATTR timer_data_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* usr_ctx) {
+	BaseType_t xHigherPriorityTaskWoken, xResult;
+    xHigherPriorityTaskWoken = pdFALSE; // ensures the scheduler does not preempt this ISR
+	xEventGroupSetBitsFromISR(collect_group, MEASURE_ALL_BIT, &xHigherPriorityTaskWoken);
+	if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR(); // yields only after the ISR is finished
+    }
+	return false;
+}
+
 void timer_setup(void) {
-	gptimer_handle_t timer; 
-	gptimer_config_t timer_config = {
+	gptimer_handle_t timer_heartbeat; 
+	gptimer_config_t timer_heartbeat_config = {
 		.clk_src = GPTIMER_CLK_SRC_DEFAULT,
 		.direction = GPTIMER_COUNT_UP, 
 		.resolution_hz = 1000000, // one tick = 1 us	
 	}; 
-	gptimer_alarm_config_t alarm_config = {
+	gptimer_alarm_config_t alarm_heartbeat_config = {
 		.reload_count = 0,
 		.alarm_count = HEARTBEAT_PERIOD_US,
 		.flags.auto_reload_on_alarm = true
 	};
-	gptimer_event_callbacks_t cbs = {
-		.on_alarm = timer_callback,
+	gptimer_event_callbacks_t cbs_heartbeat = {
+		.on_alarm = timer_heartbeat_callback,
 	}; 
-	ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &timer));
-	ESP_ERROR_CHECK(gptimer_set_alarm_action(timer, &alarm_config));
-	ESP_ERROR_CHECK(gptimer_register_event_callbacks(timer, &cbs, NULL));
-	ESP_ERROR_CHECK(gptimer_enable(timer));
-	ESP_ERROR_CHECK(gptimer_start(timer));
+	ESP_ERROR_CHECK(gptimer_new_timer(&timer_heartbeat_config, &timer_heartbeat));
+	ESP_ERROR_CHECK(gptimer_set_alarm_action(timer_heartbeat, &alarm_heartbeat_config));
+	ESP_ERROR_CHECK(gptimer_register_event_callbacks(timer_heartbeat, &cbs_heartbeat, NULL));
+	ESP_ERROR_CHECK(gptimer_enable(timer_heartbeat));
+	ESP_ERROR_CHECK(gptimer_start(timer_heartbeat));
+
+	gptimer_handle_t timer_stream; 
+	gptimer_config_t timer_stream_config = {
+		.clk_src = GPTIMER_CLK_SRC_DEFAULT,
+		.direction = GPTIMER_COUNT_UP, 
+		.resolution_hz = 1000000, // one tick = 1 us	
+	}; 
+	gptimer_alarm_config_t alarm_stream_config = {
+		.reload_count = 0,
+		.alarm_count = STREAM_PERIOD_US,
+		.flags.auto_reload_on_alarm = true
+	};
+	gptimer_event_callbacks_t cbs_stream = {
+		.on_alarm = timer_stream_callback,
+	}; 
+	ESP_ERROR_CHECK(gptimer_new_timer(&timer_stream_config, &timer_stream));
+	ESP_ERROR_CHECK(gptimer_set_alarm_action(timer_stream, &alarm_stream_config));
+	ESP_ERROR_CHECK(gptimer_register_event_callbacks(timer_stream, &cbs_stream, NULL));
+	ESP_ERROR_CHECK(gptimer_enable(timer_stream));
+	ESP_ERROR_CHECK(gptimer_start(timer_stream));
+
+	gptimer_handle_t timer_data; 
+	gptimer_config_t timer_data_config = {
+		.clk_src = GPTIMER_CLK_SRC_DEFAULT,
+		.direction = GPTIMER_COUNT_UP, 
+		.resolution_hz = 1000000, // one tick = 1 us	
+	}; 
+	gptimer_alarm_config_t alarm_data_config = {
+		.reload_count = 0,
+		.alarm_count = DATA_PERIOD_US,
+		.flags.auto_reload_on_alarm = true
+	};
+	gptimer_event_callbacks_t cbs_data = {
+		.on_alarm = timer_data_callback,
+	}; 
+	ESP_ERROR_CHECK(gptimer_new_timer(&timer_data_config, &timer_data));
+	ESP_ERROR_CHECK(gptimer_set_alarm_action(timer_data, &alarm_data_config));
+	ESP_ERROR_CHECK(gptimer_register_event_callbacks(timer_data, &cbs_data, NULL));
+	ESP_ERROR_CHECK(gptimer_enable(timer_data));
+	ESP_ERROR_CHECK(gptimer_start(timer_data));
 }
 
 void heartbeat(void* pvParams) {
@@ -440,68 +527,81 @@ void heartbeat(void* pvParams) {
 	}
 }
 
-void udp_server_create(void* pv_params) {
-	char rx_buffer[128];
-    char addr_str[128];
+void udp_stream(void* pvParams) {
+	stream_payload* payload = (stream_payload*) pvParams;
+	while (1) {
+		xEventGroupWaitBits(
+			log_group,
+			STREAM_BIT | STREAM_BIT_MANUAL,
+			pdFALSE, 
+			pdTRUE,
+			portMAX_DELAY
+		);
+		if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+			int err = sendto(payload->sock, payload->msg, strlen(payload->msg), 0, (struct sockaddr *)&payload->dest_addr, sizeof(payload->dest_addr));
+			if (err < 0) {
+				ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+				break;
+			}
+			ESP_LOGI(TAG, "Message sent");
+			xSemaphoreGive(mutex);
+		}
+		xEventGroupClearBits(log_group, STREAM_BIT);
+	}
+}
+
+void measure_sensor_values(void* pv_params) {
+	while (1) {
+		xEventGroupWaitBits(
+			collect_group,
+			MEASURE_ALL_BIT,
+			pdTRUE, 
+			pdTRUE,
+			portMAX_DELAY
+		);
+		// collect sensor data here
+		if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+			snprintf(payload->msg, sizeof(payload->msg), "{\n\t\"chip\"\t:\t\"%s\",\n\t\"firmvers\"\t:\t\"%s\",\n\t\"ip\"\t:\t\"%s\",\n\t\"temperature\"\t:\t\"%s\",\n\t\"humidity\"\t:\t\"%s\",\n\t\"pressure\"\t:\t\"%s\",\n\t\"air_quality\"\t:\t\"%s\",\n\t\"motion_detected\"\t:\t%s\n}", 
+				sensor_data->chip, sensor_data->firmvers, sensor_data->ip, sensor_data->temperature, sensor_data->humidity, sensor_data->pressure, sensor_data->air_quality, sensor_data->motion_detected? "true" : "false" 
+			);
+			xSemaphoreGive(mutex);
+		}
+	}
+}
+
+void udp_socket_create(void* pv_params) {
 	int addr_family = (int)pv_params; // ipv4
-	struct sockaddr_in dest_addr_ip4;
+	struct sockaddr_in dest_addr_ip4 = {0};
+	struct sockaddr_in dest_addr = {0};
 	int ip_protocol = IPPROTO_IP;
 	int sock; 
-	while (1) {
-		sock = socket(addr_family, SOCK_DGRAM, ip_protocol);
-		dest_addr_ip4.sin_addr.s_addr = htonl(INADDR_ANY);
-		dest_addr_ip4.sin_family = AF_INET;
-		dest_addr_ip4.sin_port = htons(PORT_UDP);
-		if (sock < 0) {
-			ESP_LOGI(S3_TAG, "Failed to create socket");  
-			continue;
-		}
-		ESP_LOGI(S3_TAG, "Created socket"); 
-		int err = bind(sock,  (struct sockaddr *)&dest_addr_ip4, sizeof(dest_addr_ip4));
-        if (err < 0) {
-            ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
-			close(sock);
-			continue;
-        }
-        ESP_LOGI(TAG, "UDP Socket bound, port %d", PORT_UDP);
-		struct sockaddr_storage source_addr; 
-		socklen_t socklen = sizeof(source_addr);
-		struct in_addr expected_addr;
-		int parse_successful = 1;
-		if (inet_pton(AF_INET, STATION3_IP, &expected_addr) != 1) {
-			ESP_LOGW(TAG, "Could not parse STATION3's IP");
-			parse_successful = 0;
-		}
-		while (1) {
-            ESP_LOGI(TAG, "Waiting for data");
-			int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
-			if (len < 0) {
-                ESP_LOGE(TAG, "recvfrom failed: errno %d", errno);
-				close(sock);
-                break;
-            } else {
-				rx_buffer[len] = 0; // Null-terminate whatever we received and treat like a string...
-				if (source_addr.ss_family == PF_INET) {
-					inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
-				}
-                ESP_LOGI(TAG, "Received %d bytes from %s:", len, addr_str);
-                ESP_LOGI(TAG, "%s", rx_buffer);
-			}
-			uint32_t actual_ip = ((struct sockaddr_in *)&source_addr)->sin_addr.s_addr;
-			if (!parse_successful || actual_ip != expected_addr.s_addr) {
-				ESP_LOGW(S3_TAG, "Rejected UDP from %s", addr_str);
-				continue;
-			}
-			strfilter(rx_buffer, 128);
-			// returns 0 = match
-			if (!strcmp(rx_buffer, "OTA_REQUESTED")) {
-				ESP_LOGI(S3_TAG, "Accepted OTA trigger from %s", addr_str);
-				xEventGroupSetBits(main_group, OTA_REQUESTED_BIT); 
-			}
-		}
-		shutdown(sock, 0); 
-		close(sock); 
+	sock = socket(addr_family, SOCK_DGRAM, ip_protocol);
+	if (sock < 0) {
+		ESP_LOGI(S3_TAG, "Failed to create socket");  
+		return;
 	}
+	dest_addr_ip4.sin_addr.s_addr = htonl(INADDR_ANY);
+	dest_addr_ip4.sin_family = AF_INET;
+	dest_addr_ip4.sin_port = htons(PORT_UDP);
+	int res = inet_pton(AF_INET, STATION3_IP, &dest_addr.sin_addr);
+	if (res != 1) {
+		ESP_LOGI(S3_TAG, "Invalid Station3 IP");
+		close(sock);
+		return;  
+	}
+	dest_addr.sin_family = AF_INET;
+	dest_addr.sin_port = htons(PORT_UDP);
+	payload->sock = sock;
+	payload->dest_addr = dest_addr;
+	ESP_LOGI(S3_TAG, "Created socket"); 
+	int err = bind(sock,  (struct sockaddr *)&dest_addr_ip4, sizeof(dest_addr_ip4));
+	if (err < 0) {
+		ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+		close(sock);
+		return;
+	}
+	ESP_LOGI(TAG, "UDP Socket bound, port %d", PORT_UDP);
+	xTaskCreate(udp_stream, "UDP Stream", 4096, payload, 2, NULL);
 }
 
 int rx(char* message, int sock) {
@@ -537,27 +637,32 @@ void handle_exit(char* tx_buffer, int sock) {
 }
 
 void handle_help(char* tx_buffer, int sock) {
-	tx("Options:\nchip\nmem\nsha\nfirmvers\n", sock);
+	tx("Options:\nreboot\nstream on\nstream off\nota flash\n ota status\n", sock);
 }
 
-void handle_chip(char* tx_buffer, int sock) {
-	tx(target_str, sock);
-	tx("\n", sock);
+void handle_reboot(char* tx_buffer, int sock) {
+	tx("Restarting...\n", sock);
+	esp_restart();
 }
 
-void handle_mem(char* tx_buffer, int sock) {
-	tx(flash_size_MB_str, sock);
-	tx("\n", sock);
+void handle_stream_on(char* tx_buffer, int sock) {
+	tx("Resuming live streaming of sensor data...\n", sock);
+	xEventGroupSetBits(log_group, STREAM_BIT_MANUAL); 
 }
 
-void handle_sha(char* tx_buffer, int sock) {
-	tx(commit_version_str, sock);
-	tx("\n", sock);
+void handle_stream_off(char* tx_buffer, int sock) {
+	tx("Pausing live streaming of sensor data...\n", sock);
+	xEventGroupClearBits(log_group, STREAM_BIT_MANUAL); 
 }
 
-void handle_version(char* tx_buffer, int sock) {
-	tx(esp_app_get_description()->version, sock);
-	tx("\n", sock);
+void handle_ota_check(char* tx_buffer, int sock) {
+	snprintf(tx_buffer, sizeof(tx_buffer), "Latest Version: %s\nRunning Version: %s\nLast time ota triggered: %s\n", server_version_str, esp_app_get_description()->version, "NULL");
+	tx(tx_buffer, sock);
+}
+
+void handle_ota_start(char* tx_buffer, int sock) {
+	tx("Initiating OTA...\n", sock);
+	xEventGroupSetBits(main_group, OTA_REQUESTED_BIT);
 }
 
 void handle_invalid(char* tx_buffer, int sock) {
@@ -587,16 +692,17 @@ void communicate(int sock) {
 			exit = 1;
 		} else if (!strcmp(rx_buffer, "help")) {
 			handle_help(tx_buffer, sock);
-		} else if (!strcmp(rx_buffer, "chip")) {
-			handle_chip(tx_buffer, sock);
-		} else if (!strcmp(rx_buffer, "mem")) {
-			handle_mem(tx_buffer, sock);
-		} else if (!strcmp(rx_buffer, "sha")) {
-			handle_sha(tx_buffer, sock);
-		} else if (!strcmp(rx_buffer, "firmvers")) {
-			handle_version(tx_buffer, sock);
-		}
-		else {
+		} else if (!strcmp(rx_buffer, "reboot")) {
+			handle_reboot(tx_buffer, sock);
+		} else if (!strcmp(rx_buffer, "stream on")) {
+			handle_stream_on(tx_buffer, sock);
+		} else if (!strcmp(rx_buffer, "stream off")) {
+			handle_stream_off(tx_buffer, sock);
+		} else if (!strcmp(rx_buffer, "ota status")) {
+			handle_ota_check(tx_buffer, sock);
+		} else if (!strcmp(rx_buffer, "ota flash")) {
+			handle_ota_start(tx_buffer, sock);
+		} else {
 			handle_invalid(tx_buffer, sock);
 		}
 	}
@@ -727,6 +833,7 @@ void s3_main(void) {
 	ESP_LOGW(S3_TAG, "s3_main started");
 	main_group = xEventGroupCreate();
 	log_group = xEventGroupCreate();
+	collect_group = xEventGroupCreate();
 	load_ip(); 
 	validate_ota(); 
 	network_start();
@@ -737,9 +844,14 @@ void s3_main(void) {
 		pdTRUE,
 		portMAX_DELAY
 	); 
+	sensor_data = (stream_data*)calloc(1, sizeof(stream_data));
+	payload = (stream_payload*)calloc(1, sizeof(stream_payload)); 
+	payload->_stream_data = sensor_data;
+	mutex = xSemaphoreCreateMutex();
 	timer_setup();
+	xTaskCreate(measure_sensor_values, "Measure sensor values", 4096, NULL, 3, NULL);
 	xTaskCreate(heartbeat, "Heartbeat Monitor Task", 4096, NULL, 3, NULL); 
-	xTaskCreate(udp_server_create, "UDP Server Task", 4096, (void *)AF_INET, 5, NULL); 	
+	xTaskCreate(udp_socket_create, "UDP Server Task", 4096, (void *)AF_INET, 5, NULL); 	
 	xTaskCreate(tcp_server_create, "TCP Server Task", 4096, (void *)AF_INET, 5, NULL); 	
 	while (1) {
 		xEventGroupWaitBits(
