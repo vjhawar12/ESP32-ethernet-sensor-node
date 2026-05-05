@@ -1,4 +1,5 @@
 #include "s3.h"
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -36,6 +37,11 @@
 #endif
 #include "cJSON.h"
 #include "freertos/semphr.h"
+#include "driver/i2c_master.h"
+#include "driver/i2c_slave.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 // Exceeding around 1024 causes stack overflow
 #define MAX_HTTP_OUTPUT_BUFFER 1024
 #define ETH_CONNECTED_BIT BIT0
@@ -81,6 +87,21 @@
 // port for udp server
 #define PORT_UDP 5000
 #define PORT_TCP 4000
+// I2C port setup: change these later
+#define MASTER_SCL_GPIO GPIO_NUM_0
+#define MASTER_SDA_GPIO GPIO_NUM_1
+#define AHT20_SCL_GPIO GPIO_NUM_0
+#define AHT20_SDA_GPIO GPIO_NUM_1
+// from AHT20 datasheet
+#define AHT20_ADDR 0x38
+// Grounding A0-2 gives address 0x20
+#define PCF8585_ADDR 0x20
+// standard 100 khz
+#define SCL_FREQUENCY_HZ 100000
+#define AHT20_DATA_LENGTH 128
+#define HCSR505_GPIO 2
+// connect INT to gpio pin 10
+#define HCSR505_INTR_PIN GPIO_NUM_10
 
 static char response_buffer[MAX_HTTP_OUTPUT_BUFFER + 1] = {0};
 char server_version_str[64];
@@ -97,14 +118,19 @@ esp_eth_handle_t eth_handle = NULL;
 spi_device_handle_t spi_handle = NULL;
 SemaphoreHandle_t mutex;
 static EventGroupHandle_t log_group, main_group, collect_group; 
+i2c_master_dev_handle_t aht20_handle, hcsr505_handle;
+uint8_t aht20_data[AHT20_DATA_LENGTH];
+uint8_t success;
+adc_oneshot_unit_handle_t adc_oneshot_handle; 
+adc_cali_handle_t adc_cali_handle; 
 int manifest_overflow = 0;
+
 typedef struct stream_data {
 	char chip[16];
 	char firmvers[16];
 	char ip[16];
 	char temperature[16];
 	char humidity[16];
-	char pressure[16];
 	char air_quality[16];
 	bool motion_detected;
 } stream_data; 
@@ -350,7 +376,7 @@ int less_than(const char *current, const char *latest)
     return c_patch < l_patch;
 }
 
-void parse_manifest(void) {
+void parse_manifest(bool can_trigger_ota) {
 	ESP_LOGI(TAG, "Raw manifest response: %s", response_buffer);
 	cJSON *json = cJSON_Parse(response_buffer);
 	if (json == NULL) {
@@ -389,6 +415,10 @@ void parse_manifest(void) {
 		}
 		ESP_LOGI(TAG, "Current app version: %s", esp_app_get_description()->version);
 		ESP_LOGI(TAG, "Manifest version: %s", server_version->valuestring);
+		if (!can_trigger_ota) {
+			cJSON_Delete(json);
+			return;
+		}
 		// comparing current version (app_desc->version) with latest version (version->valuestring)
 		if (less_than(esp_app_get_description()->version, server_version->valuestring)) {
 			// trigger OTA
@@ -527,6 +557,9 @@ void heartbeat(void* pvParams) {
 	}
 }
 
+
+// Wait for either the periodic stream event or a manual stream-enable flag,
+// then send the latest formatted payload to the backend over UDP.
 void udp_stream(void* pvParams) {
 	stream_payload* payload = (stream_payload*) pvParams;
 	while (1) {
@@ -538,34 +571,18 @@ void udp_stream(void* pvParams) {
 			portMAX_DELAY
 		);
 		if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+			snprintf(payload->msg, sizeof(payload->msg), "{\n\t\"chip\"\t:\t\"%s\",\n\t\"firmvers\"\t:\t\"%s\",\n\t\"ip\"\t:\t\"%s\",\n\t\"temperature\"\t:\t\"%s\",\n\t\"humidity\"\t:\t\"%s\",\n\t\"air_quality\"\t:\t\"%s\",\n\t\"motion_detected\"\t:\t%s\n}", 
+				sensor_data->chip, sensor_data->firmvers, sensor_data->ip, sensor_data->temperature, sensor_data->humidity, sensor_data->air_quality, sensor_data->motion_detected? "true" : "false" 
+			);
 			int err = sendto(payload->sock, payload->msg, strlen(payload->msg), 0, (struct sockaddr *)&payload->dest_addr, sizeof(payload->dest_addr));
 			if (err < 0) {
 				ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-				break;
+			} else {
+				ESP_LOGI(TAG, "Message sent");
 			}
-			ESP_LOGI(TAG, "Message sent");
 			xSemaphoreGive(mutex);
 		}
 		xEventGroupClearBits(log_group, STREAM_BIT);
-	}
-}
-
-void measure_sensor_values(void* pv_params) {
-	while (1) {
-		xEventGroupWaitBits(
-			collect_group,
-			MEASURE_ALL_BIT,
-			pdTRUE, 
-			pdTRUE,
-			portMAX_DELAY
-		);
-		// collect sensor data here
-		if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
-			snprintf(payload->msg, sizeof(payload->msg), "{\n\t\"chip\"\t:\t\"%s\",\n\t\"firmvers\"\t:\t\"%s\",\n\t\"ip\"\t:\t\"%s\",\n\t\"temperature\"\t:\t\"%s\",\n\t\"humidity\"\t:\t\"%s\",\n\t\"pressure\"\t:\t\"%s\",\n\t\"air_quality\"\t:\t\"%s\",\n\t\"motion_detected\"\t:\t%s\n}", 
-				sensor_data->chip, sensor_data->firmvers, sensor_data->ip, sensor_data->temperature, sensor_data->humidity, sensor_data->pressure, sensor_data->air_quality, sensor_data->motion_detected? "true" : "false" 
-			);
-			xSemaphoreGive(mutex);
-		}
 	}
 }
 
@@ -780,31 +797,57 @@ void tcp_server_create(void* pv_params) {
 
 // stores the ip address (found from nvs) of the node in ip_addr. If not found in NVS, it stores DEFAULT_IP_ADDR
 void load_ip(void) {
-	esp_err_t err = nvs_flash_init();
 	nvs_handle_t nvs_handle; 
+	esp_err_t err;
+	ESP_LOGI(S3_TAG, "Opening NVS partition ...");
+	err = nvs_open("netcfg", NVS_READWRITE, &nvs_handle); 
 	if (err != ESP_OK) {
-		ESP_LOGE(S3_TAG, "Could not initialize NVS partition");
+		ESP_LOGE(S3_TAG, "Could not open NVS partition");
+		return;
 	} else {
-		ESP_LOGI(S3_TAG, "Opening NVS partition ...");
-		err = nvs_open("netcfg", NVS_READWRITE, &nvs_handle); 
-		if (err != ESP_OK) {
-			ESP_LOGE(S3_TAG, "Could not open NVS partition");
+		size_t ip_addr_len = sizeof(ip_addr); 
+		err = nvs_get_str(nvs_handle, "ip_addr", ip_addr, &ip_addr_len); 
+		if (err == ESP_OK) {
+			ESP_LOGI(S3_TAG, "Retrieved ip address %s", ip_addr); 
+			nvs_close(nvs_handle);
 		} else {
-			size_t ip_addr_len = sizeof(ip_addr); 
-			err = nvs_get_str(nvs_handle, "ip_addr", ip_addr, &ip_addr_len); 
-			if (err == ESP_OK) {
-				ESP_LOGI(S3_TAG, "Retrieved ip address %s", ip_addr); 
-				nvs_close(nvs_handle);
-			} else {
-				ESP_LOGI(S3_TAG, "IP Address not found, writing %s", ip_addr);
-				err = nvs_set_str(nvs_handle, "ip_addr", ip_addr);
-				ESP_ERROR_CHECK(err);
-				ESP_LOGI(S3_TAG, "Successfully wrote %s to ip_addr", ip_addr); 
-				nvs_close(nvs_handle);
-			}
+			ESP_LOGI(S3_TAG, "IP Address not found, writing %s", ip_addr);
+			err = nvs_set_str(nvs_handle, "ip_addr", ip_addr);
+			ESP_ERROR_CHECK(err);
+			ESP_LOGI(S3_TAG, "Successfully wrote %s to ip_addr", ip_addr); 
+			nvs_close(nvs_handle);
 		}
+		snprintf(sensor_data->ip, sizeof(sensor_data->ip), "%s", ip_addr);
 	}
 }
+
+void load_chip(void) {
+	nvs_handle_t nvs_handle; 
+	esp_err_t err;
+	const char chip[] = "esp32s3"; 
+	char chip_name[16];
+	size_t chip_len = sizeof(chip_name); 
+	ESP_LOGI(S3_TAG, "Opening NVS partition ...");
+	err = nvs_open("netcfg", NVS_READWRITE, &nvs_handle); 
+	if (err != ESP_OK) {
+		ESP_LOGE(S3_TAG, "Could not open NVS partition");
+		return;
+	} else {
+		err = nvs_get_str(nvs_handle, "chip", chip_name, &chip_len); 
+		if (err == ESP_OK) {
+			ESP_LOGI(S3_TAG, "Retrieved chip name %s", chip_name); 
+			nvs_close(nvs_handle);
+			snprintf(sensor_data->chip, sizeof(sensor_data->chip), "%s", chip_name);
+		} else {
+			ESP_LOGI(S3_TAG, "Chip name not found, writing %s", chip);
+			err = nvs_set_str(nvs_handle, "chip", chip);
+			ESP_ERROR_CHECK(err);
+			ESP_LOGI(S3_TAG, "Successfully wrote %s to chip", chip); 
+			nvs_close(nvs_handle);
+			snprintf(sensor_data->chip, sizeof(sensor_data->chip), "%s", chip);
+		}
+	}
+} 
 
 void validate_ota(void) {
 	const esp_partition_t *running = esp_ota_get_running_partition();
@@ -829,12 +872,201 @@ void network_start(void) {
 	ESP_ERROR_CHECK(attach_driver_to_network(ip_addr));
 }
 
+
+uint64_t read_aht20() {
+	uint8_t measure[3] = {0xAC, 0x33, 0x00}; 
+	esp_err_t err; 
+	err = i2c_master_transmit(aht20_handle, measure, 3, -1);
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "Error on calibration!");
+		return 0x0;
+	}
+	vTaskDelay(pdMS_TO_TICKS(80));
+	uint8_t init = 0x71;
+	err = i2c_master_transmit_receive(aht20_handle, &init, 1, &success, 1, -1);
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "Error measuring temperature/humidity!");
+		return 0x0;
+	}
+	if (!(success & (1 << 7))) {
+		// measurement completed
+		uint8_t data[6];
+		err = i2c_master_receive(aht20_handle, data, 6, -1);
+		if (err != ESP_OK) {
+			ESP_LOGW(TAG, "Error measuring temperature/humidity!");
+			return 0x0;
+		}
+		// data[0] = status
+		// data[1], data[2], upper 4 bits of data[3] = humidity
+		// lower 4 bits of data[3], data[4], data[5] = temperature
+		// remaining: CRC
+		uint32_t humidity = ((uint32_t)data[1] << 12) | ((uint32_t)data[2] << 4) | ((uint32_t)(data[3] >> 4) & 0x0F);
+		uint32_t temperature = ((uint32_t)(data[3] & 0x0F) << 16) | (uint32_t)data[4] << 8 | (uint32_t)data[5];
+		return ((uint64_t)humidity << 32) | (uint64_t)temperature;
+	}
+	return 0x0;
+}
+
+
+int read_hcsr505() {
+	uint8_t init[2] = {0xFF, 0xFF};  
+	uint8_t raw_data[2];
+	i2c_master_transmit(hcsr505_handle, init, 2, -1);
+	i2c_master_receive(hcsr505_handle, raw_data, 2, -1);
+	uint16_t data = ((uint16_t)(raw_data[1] << 8)) | raw_data[0];
+	return (data & (uint16_t)(1 << HCSR505_GPIO)) != 0;
+}
+
+// calculate the ppm from the voltage
+// returns V
+float read_mq135() {
+	int adc_raw, adc_cali; 
+	ESP_ERROR_CHECK(adc_oneshot_read(adc_oneshot_handle, ADC_CHANNEL_1, &adc_raw));
+	ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc_cali_handle, adc_raw, &adc_cali));
+	return adc_cali / 1000.0f;
+}
+
+// Periodic application task that will eventually gather all sensor values and
+// refresh the outgoing telemetry JSON. Right now the payload structure and
+// synchronization are in place even though sensor collection is still being
+// expanded.
+void measure_sensor_values(void* pv_params) {
+	while (1) {
+		xEventGroupWaitBits(
+			collect_group,
+			MEASURE_ALL_BIT,
+			pdTRUE, 
+			pdTRUE,
+			portMAX_DELAY
+		);
+		// AHT20
+		uint64_t data = read_aht20();
+		if (data == 0) continue;
+		uint32_t humidity = (uint32_t)((data & 0xFFFFFFFF00000000) >> 32);
+		uint32_t temperature = (uint32_t)(data & 0x00000000FFFFFFFF);
+		float humidity_fl = 100.0f * humidity / (1048576.0f);
+		float temp_celcius_fl = (200.0f * temperature / (1048576.0f)) - 50.0f;
+		// MQ135
+		float air_quality = read_mq135();	
+		 // HCSR505
+		int motion_detected = read_hcsr505();
+		if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
+			snprintf(sensor_data->temperature, sizeof(sensor_data->temperature), "%f", temp_celcius_fl);
+			snprintf(sensor_data->humidity, sizeof(sensor_data->humidity), "%f", humidity_fl);
+			snprintf(sensor_data->air_quality, sizeof(sensor_data->air_quality), "%f", air_quality); 
+			sensor_data->motion_detected = motion_detected;
+			xSemaphoreGive(mutex);
+		}
+	}	
+}
+
+static void IRAM_ATTR motion_detected_handler(void* pvParams) {
+	// log the date and time here too
+	ESP_LOGW(TAG, "Motion detected!");
+}
+
+
+void gpio_init(void) {
+	gpio_config_t io_intr_conf = {
+		.pin_bit_mask = (1ULL << HCSR505_INTR_PIN),
+		.mode = GPIO_MODE_INPUT,
+		.pull_up_en = GPIO_PULLUP_DISABLE,
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.intr_type = GPIO_INTR_HIGH_LEVEL,
+	}; 
+	gpio_config(&io_intr_conf);
+	// mac_phy_init() calls gpio_install_isr_service(0) which is needed for gpio_isr_handler_add
+	// so ethernet_init must happen before gpio_init
+	gpio_isr_handler_add(HCSR505_INTR_PIN, motion_detected_handler, NULL);
+}; 
+
+
+void i2c_init(void) {
+	// master
+	// hardware controller, pins, timing, etc
+	i2c_master_bus_config_t i2c_mst_config = {
+		.clk_source = I2C_CLK_SRC_DEFAULT,
+		.i2c_port = I2C_NUM_0,
+		.scl_io_num = MASTER_SCL_GPIO,
+		.sda_io_num = MASTER_SDA_GPIO,
+		.glitch_ignore_cnt = 7,
+		.flags.enable_internal_pullup = false, // going to rely on external pullup ~10 kohms instead 
+	};
+	i2c_master_bus_handle_t i2c_bus_handle;
+	ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &i2c_bus_handle)); 
+	// slave 1: aht20
+	i2c_device_config_t aht20_cfg = {
+		.dev_addr_length = I2C_ADDR_BIT_LEN_7,
+		.device_address = AHT20_ADDR,
+		.scl_speed_hz = SCL_FREQUENCY_HZ,	
+	};
+	// slave 1: pcf8575
+	i2c_device_config_t pcf8575_cfg = {
+		.dev_addr_length = I2C_ADDR_BIT_LEN_7,
+		.device_address = PCF8585_ADDR,
+		.scl_speed_hz = SCL_FREQUENCY_HZ,	
+	};
+	ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus_handle, &aht20_cfg, &aht20_handle)); 
+	ESP_ERROR_CHECK(i2c_master_probe(i2c_bus_handle, AHT20_ADDR, -1));
+	ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus_handle, &pcf8575_cfg, &hcsr505_handle)); 
+	ESP_ERROR_CHECK(i2c_master_probe(i2c_bus_handle, PCF8585_ADDR, -1));
+	uint8_t init = 0x71;
+	esp_err_t err; 
+	vTaskDelay(pdMS_TO_TICKS(40));
+	err = i2c_master_transmit_receive(aht20_handle, &init, 1, &success, 1, -1);
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "Error on calibration!");
+		return;
+	}
+	if (!(success & 0x08)) {
+		// init required
+		uint8_t calibrate[3] = {0xBE, 0x08, 0x00};
+		success = 0;
+		err = i2c_master_transmit(aht20_handle, calibrate, 3, -1);
+		vTaskDelay(pdMS_TO_TICKS(10));
+		if (err != ESP_OK) {
+			ESP_LOGW(TAG, "Error on calibration!");
+			return;
+		}
+	}
+}	
+
+void adc_init() {
+	adc_oneshot_unit_init_cfg_t oneshot_config = {
+		.unit_id = ADC_UNIT_1, 
+		.ulp_mode = ADC_ULP_MODE_DISABLE,
+	};
+	adc_oneshot_chan_cfg_t chan_config = {
+		.bitwidth = ADC_BITWIDTH_13, 
+		.atten = ADC_ATTEN_DB_12,
+	};
+	int adc_raw, adc_cali;
+	ESP_ERROR_CHECK(adc_oneshot_new_unit(&oneshot_config, &adc_oneshot_handle));
+	adc_oneshot_config_channel(adc_oneshot_handle, ADC_CHANNEL_1, &chan_config); 
+	adc_cali_curve_fitting_config_t cali_config = {
+		.unit_id = ADC_UNIT_1,
+		.atten = ADC_ATTEN_DB_12,
+		.bitwidth = ADC_BITWIDTH_13,
+	};
+	ESP_ERROR_CHECK(adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle)); 
+}
+
+
 void s3_main(void) {   
 	ESP_LOGW(S3_TAG, "s3_main started");
 	main_group = xEventGroupCreate();
 	log_group = xEventGroupCreate();
 	collect_group = xEventGroupCreate();
-	load_ip(); 
+	sensor_data = (stream_data*)calloc(1, sizeof(stream_data));
+	payload = (stream_payload*)calloc(1, sizeof(stream_payload)); 
+	payload->_stream_data = sensor_data;
+	esp_err_t err = nvs_flash_init(); 
+	if (err != ESP_OK) {
+		ESP_LOGE(S3_TAG, "Could not initialize NVS partition");
+	} else {
+		load_ip(); 
+		load_chip();
+	}
 	validate_ota(); 
 	network_start();
 	xEventGroupWaitBits(
@@ -844,9 +1076,12 @@ void s3_main(void) {
 		pdTRUE,
 		portMAX_DELAY
 	); 
-	sensor_data = (stream_data*)calloc(1, sizeof(stream_data));
-	payload = (stream_payload*)calloc(1, sizeof(stream_payload)); 
-	payload->_stream_data = sensor_data;
+	i2c_init();
+	adc_init();
+	gpio_init();
+	if (http_get_request() == ESP_OK) {
+		parse_manifest(false);
+	}
 	mutex = xSemaphoreCreateMutex();
 	timer_setup();
 	xTaskCreate(measure_sensor_values, "Measure sensor values", 4096, NULL, 3, NULL);
@@ -865,6 +1100,6 @@ void s3_main(void) {
 		if (http_get_request() != ESP_OK) {
 			continue;
 		}		
-		parse_manifest();
+		parse_manifest(true);
 	}
 }  	 
