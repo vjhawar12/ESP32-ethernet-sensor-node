@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - restore-s3-runtime-glue
 
 jobs:
   build:
