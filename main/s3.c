@@ -124,7 +124,8 @@ uint8_t success;
 adc_oneshot_unit_handle_t adc_oneshot_handle; 
 adc_cali_handle_t adc_cali_handle; 
 int manifest_overflow = 0;
-
+// Snapshot of the latest application telemetry. These fields are formatted into
+// a JSON payload and sent periodically over UDP.
 typedef struct stream_data {
 	char chip[16];
 	char firmvers[16];
@@ -135,6 +136,8 @@ typedef struct stream_data {
 	bool motion_detected;
 } stream_data; 
 stream_data* sensor_data;
+// Transport-side context for the UDP streaming task. Bundles the latest
+// payload string, destination address, and socket handle.
 typedef struct stream_payload {
 	stream_data* _stream_data;
 	int sock;
@@ -143,6 +146,8 @@ typedef struct stream_payload {
 } stream_payload;
 stream_payload* payload;
 
+// Remove CR/LF from a received console command so string comparison works
+// reliably for commands typed from nc/telnet-style clients.
 void strfilter(char* buffer, int length) {
 	int i = 0;
 	while (i < length && buffer[i] != 0) {
@@ -154,6 +159,8 @@ void strfilter(char* buffer, int length) {
 	}
 }
 
+// Bring up the ESP-IDF networking foundation: TCP/IP stack, default event
+// loop, and an Ethernet netif object that the W5500 driver will attach to.
 esp_err_t network_init(void) {
 	ESP_RETURN_ON_ERROR(esp_netif_init(), S3_TAG, "esp_netif failed"); // connects TCP/IP stack to the hardware
 	ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), S3_TAG, "esp_event_loop_create_default failed"); // event loop that reports link status and network changes, not packet transmission	
@@ -207,12 +214,16 @@ esp_err_t mac_phy_init(void) {
 }  	
 
 // driver initialization with mac and phy
+// Install the ESP-IDF Ethernet driver instance backed by the initialized
+// W5500 MAC/PHY objects.
 esp_err_t driver_init(void) {
 	esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
 	ESP_RETURN_ON_ERROR(esp_eth_driver_install(&config, &eth_handle), S3_TAG, "ETH_DEFAULT_CONFIG failed");
 	return ESP_OK;
 }
 
+// IP acquisition callback. Once the interface has a valid address we set an
+// event bit so the rest of the application can safely start network services.
 void got_ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     const esp_netif_ip_info_t *ip_info = &event->ip_info;
@@ -244,6 +255,8 @@ void eth_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
     }
 }
 
+// Replace DHCP with a known static IP. This simplifies multi-node deployment
+// and makes it easier for the backend/controller to address nodes directly.
 esp_err_t assign_static_ip(const char* ip_addr) {
 	// switching from dhcp to static ip
 	ESP_RETURN_ON_ERROR(esp_netif_dhcpc_stop(eth_netif), S3_TAG, "esp_netif_dhcpc_stop failed");
@@ -276,6 +289,8 @@ esp_err_t attach_driver_to_network(const char* ip_addr) {
 	return ESP_OK;
 }
 
+// HTTP client callback used during manifest fetch. The response may arrive in
+// multiple chunks, so data is appended incrementally into response_buffer.
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
     static int output_len;       // Stores number of bytes read
@@ -336,6 +351,8 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
+// Fetch the OTA manifest over HTTPS. The event handler fills response_buffer,
+// which is then parsed by parse_manifest().
 esp_err_t http_get_request(void) {
     esp_http_client_config_t config = {
         .url = MANIFEST,	
@@ -363,6 +380,8 @@ esp_err_t http_get_request(void) {
 	return ESP_OK;
 }
 
+// Compare semantic versions in MAJOR.MINOR.PATCH form. Returns non-zero when
+// the current running image is older than the manifest version.
 int less_than(const char *current, const char *latest)
 {
     int c_major, c_minor, c_patch;
@@ -376,6 +395,8 @@ int less_than(const char *current, const char *latest)
     return c_patch < l_patch;
 }
 
+// Parse the manifest JSON, capture useful metadata, and trigger OTA when a
+// newer firmware image is available.
 void parse_manifest(bool can_trigger_ota) {
 	ESP_LOGI(TAG, "Raw manifest response: %s", response_buffer);
 	cJSON *json = cJSON_Parse(response_buffer);
@@ -482,6 +503,13 @@ static bool IRAM_ATTR timer_data_callback(gptimer_handle_t timer, const gptimer_
 	return false;
 }
 
+// Create three independent periodic timers:
+// 1) heartbeat logging
+// 2) UDP streaming cadence
+// 3) sensor collection cadence
+//
+// The callbacks only set event bits from ISR context; the real work is done in
+// tasks so the ISR path stays short and deterministic.
 void timer_setup(void) {
 	gptimer_handle_t timer_heartbeat; 
 	gptimer_config_t timer_heartbeat_config = {
@@ -544,6 +572,8 @@ void timer_setup(void) {
 	ESP_ERROR_CHECK(gptimer_start(timer_data));
 }
 
+// Periodic liveness task. Useful during bring-up and field debugging to prove
+// that the node is still running even when no client is connected.
 void heartbeat(void* pvParams) {
 	while (1) {
 		xEventGroupWaitBits(
@@ -586,6 +616,8 @@ void udp_stream(void* pvParams) {
 	}
 }
 
+// Create and bind the UDP socket used for telemetry, then spawn the task that
+// transmits payloads on stream events.
 void udp_socket_create(void* pv_params) {
 	int addr_family = (int)pv_params; // ipv4
 	struct sockaddr_in dest_addr_ip4 = {0};
@@ -621,6 +653,7 @@ void udp_socket_create(void* pv_params) {
 	xTaskCreate(udp_stream, "UDP Stream", 4096, payload, 2, NULL);
 }
 
+// Receive one command from the TCP console client
 int rx(char* message, int sock) {
 	int len = recv(sock, message, 127, 0);
 	if (len < 0) {
@@ -636,6 +669,8 @@ int rx(char* message, int sock) {
 	}
 }
 
+// Send the full message, retrying until all bytes are written or the socket
+// reports an error.
 void tx(const char* message, int sock) {
 	int to_write = strlen(message);
 	int len = strlen(message);
@@ -686,6 +721,8 @@ void handle_invalid(char* tx_buffer, int sock) {
 	tx("Invalid command. Use 'help' to see valid commands\n", sock);
 }
 
+// Simple line-oriented TCP console for remote interaction with the node. This
+// is intentionally small but useful for remote bring-up and OTA control.
 void communicate(int sock) {
 	char rx_buffer[256];
 	char tx_buffer[256];
@@ -725,6 +762,8 @@ void communicate(int sock) {
 	}
 }
 
+// Start the TCP console server. Each accepted connection is handled in-place
+// and closed before the server returns to listen for the next client.
 void tcp_server_create(void* pv_params) {
 	const int buffer_length = 128;
 	char addr_str[buffer_length]; // client ip address 
@@ -796,6 +835,8 @@ void tcp_server_create(void* pv_params) {
 }
 
 // stores the ip address (found from nvs) of the node in ip_addr. If not found in NVS, it stores DEFAULT_IP_ADDR
+// Load a persistent static IP from NVS. On first boot, write the default node
+// IP so future boots reuse a stable address.
 void load_ip(void) {
 	nvs_handle_t nvs_handle; 
 	esp_err_t err;
@@ -849,6 +890,8 @@ void load_chip(void) {
 	}
 } 
 
+// If we successfully booted an OTA slot, mark it valid so ESP-IDF cancels any
+// pending rollback to the previous image.
 void validate_ota(void) {
 	const esp_partition_t *running = esp_ota_get_running_partition();
 	if (running != NULL) {
@@ -865,6 +908,7 @@ void validate_ota(void) {
 	}	
 }
 
+// Bring up the full Ethernet path in dependency order.
 void network_start(void) {
 	ESP_ERROR_CHECK(network_init());
 	ESP_ERROR_CHECK(mac_phy_init());
@@ -1051,7 +1095,8 @@ void adc_init() {
 	ESP_ERROR_CHECK(adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle)); 
 }
 
-
+// Main firmware control path. After initialization it waits for OTA request
+// events while the rest of the system runs in FreeRTOS tasks
 void s3_main(void) {   
 	ESP_LOGW(S3_TAG, "s3_main started");
 	main_group = xEventGroupCreate();
