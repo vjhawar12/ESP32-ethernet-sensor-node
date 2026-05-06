@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "s3.c"
+    SRCS "peripherals.c" "periodic.c" "nvs.c" "http.c" "ota.c" "app_state.c" "comms.c" "sensors.c" "network.c" "main.c" "s3.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES "cert.pem"
     PRIV_REQUIRES  esp_https_ota app_update
