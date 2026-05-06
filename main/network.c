@@ -1,10 +1,6 @@
 #include "esp_netif.h"
-#include "esp_eth.h"
 #include "esp_eth_phy_w5500.h"
 #include "esp_eth_mac_w5500.h"
-#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-#include "esp_crt_bundle.h"
-#endif
 #include "app_config.h"
 #include "network.h"
 #include "app_config.h"
@@ -13,6 +9,20 @@
 #include "lwip/ip4_addr.h"
 #include "manifest.h"
 #include "rtos_objects.h"
+#include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "esp_eth.h"
+#include "driver/spi_master.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include <string.h>
+#include <sys/param.h>
+#include <stdio.h>
+#include "stdbool.h"
+#include <lwip/netdb.h>
+#include "freertos/semphr.h"
 
 esp_netif_t *eth_netif = NULL;
 esp_eth_mac_t *mac = NULL;
