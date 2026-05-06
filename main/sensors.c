@@ -5,10 +5,8 @@
 #include "app_config.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
-#include "app_state.h"
-
-extern stream_data* sensor_data;
-extern stream_payload* payload;
+#include "sensor_context.h"
+#include "rtos_objects.h"
 
 uint64_t read_aht20(i2c_master_dev_handle_t aht20_handle) {
     uint8_t success;

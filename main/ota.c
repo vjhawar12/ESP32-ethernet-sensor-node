@@ -45,9 +45,8 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
 #include "ota.h"
-
+#include "manifest.h"
 
 // Compare semantic versions in MAJOR.MINOR.PATCH form. Returns non-zero when
 // the current running image is older than the manifest version.

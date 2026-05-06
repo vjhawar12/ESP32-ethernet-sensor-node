@@ -11,7 +11,8 @@
 #include "esp_err.h"
 #include "esp_check.h"
 #include "lwip/ip4_addr.h"
-#include "app_state.h"
+#include "manifest.h"
+#include "rtos_objects.h"
 
 esp_netif_t *eth_netif = NULL;
 esp_eth_mac_t *mac = NULL;

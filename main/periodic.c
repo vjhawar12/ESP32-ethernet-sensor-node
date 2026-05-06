@@ -45,11 +45,12 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
+#include "manifest.h"
 #include "ota.h"
 #include "http.h"
 #include "nvs.h"
 #include "periodic.h"
+#include "rtos_objects.h"
 
 
 static bool IRAM_ATTR timer_heartbeat_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* usr_ctx) {

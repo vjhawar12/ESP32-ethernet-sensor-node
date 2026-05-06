@@ -1,7 +1,8 @@
-#include "driver/gpio.h"
-
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
+
+#include "driver/gpio.h"
+
 // Exceeding around 1024 causes stack overflow
 #define MAX_HTTP_OUTPUT_BUFFER 1024
 #define ETH_CONNECTED_BIT BIT0

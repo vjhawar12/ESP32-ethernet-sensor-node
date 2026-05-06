@@ -48,12 +48,11 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
 #include "ota.h"
 #include "http.h"
 #include "nvs.h"
 
-#endif
+
 
 // Create three independent periodic timers:
 // 1) heartbeat logging
@@ -66,3 +65,5 @@ void timer_setup(void);
 // Periodic liveness task. Useful during bring-up and field debugging to prove
 // that the node is still running even when no client is connected.
 void heartbeat(void* pvParams);
+
+#endif

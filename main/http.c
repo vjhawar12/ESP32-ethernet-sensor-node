@@ -45,9 +45,9 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
 #include "ota.h"
 #include "http.h"
+#include "manifest.h"
 
 // HTTP client callback used during manifest fetch. The response may arrive in
 // multiple chunks, so data is appended incrementally into response_buffer.

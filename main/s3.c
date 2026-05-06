@@ -45,21 +45,25 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
 #include "ota.h"
 #include "http.h"
 #include "nvs.h"
 #include "periodic.h"
 #include "peripherals.h"
+#include "rtos_objects.h"
+#include "sensor_context.h"
 
-extern stream_payload* payload;
 
 // Main firmware control path. After initialization it waits for OTA request
 // events while the rest of the system runs in FreeRTOS tasks
 void s3_main(void) {   
 	ESP_LOGW(S3_TAG, "s3_main started");
-	groups_init();
-	stream_init();
+	main_group = xEventGroupCreate();
+    collect_group = xEventGroupCreate();
+    log_group = xEventGroupCreate();
+	sensor_data = (stream_data*)calloc(1, sizeof(stream_data));
+	payload = (stream_payload*)calloc(1, sizeof(stream_payload)); 
+	payload->_stream_data = sensor_data;
 	nvs_init();
 	validate_ota(); 
 	network_start();

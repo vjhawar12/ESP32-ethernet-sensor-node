@@ -1,5 +1,5 @@
-#ifndef PERIPHERALS_H
-#define PERIPHERALS_H
+#ifndef NVS_H
+#define NVS_H
 
 #include "s3.h"
 #include "esp_err.h"
@@ -48,15 +48,15 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
 #include "ota.h"
 #include "http.h"
-#include "nvs.h"
-#include "periodic.h"
+
+
+// stores the ip address (found from nvs) of the node in ip_addr. If not found in NVS, it stores DEFAULT_IP_ADDR
+// Load a persistent static IP from NVS. On first boot, write the default node
+// IP so future boots reuse a stable address.
+void load_ip(void);
+void load_chip(void);
+void nvs_init(void);
 
 #endif
-
-
-void gpio_init(void);
-void i2c_init(void);
-void adc_init(void);

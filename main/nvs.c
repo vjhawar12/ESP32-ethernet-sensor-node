@@ -45,10 +45,11 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
 #include "ota.h"
 #include "http.h"
 #include "nvs.h"
+#include "manifest.h"
+#include "sensor_context.h"
 
 extern stream_data* sensor_data;
 

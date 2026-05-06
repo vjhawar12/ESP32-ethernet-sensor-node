@@ -45,10 +45,10 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
+#include "rtos_objects.h"
+#include "sensor_context.h"
+#include "manifest.h"
 
-extern stream_data* sensor_data;
-extern stream_payload* payload;
 
 // Remove CR/LF from a received console command so string comparison works
 // reliably for commands typed from nc/telnet-style clients.

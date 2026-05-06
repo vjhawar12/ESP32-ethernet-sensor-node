@@ -1,5 +1,5 @@
-#ifndef HTTP_H
-#define HTTP_H
+#ifndef OTA_H
+#define OTA_H
 
 #include "s3.h"
 #include "esp_err.h"
@@ -48,18 +48,20 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
-#include "ota.h"
-
-#endif
 
 extern const char server_cert_pem_start[] asm("_binary_cert_pem_start");
 
 
-// HTTP client callback used during manifest fetch. The response may arrive in
-// multiple chunks, so data is appended incrementally into response_buffer.
-esp_err_t _http_event_handler(esp_http_client_event_t *evt);
+// Compare semantic versions in MAJOR.MINOR.PATCH form. Returns non-zero when
+// the current running image is older than the manifest version.
+int less_than(const char *current, const char *latest);
 
-// Fetch the OTA manifest over HTTPS. The event handler fills response_buffer,
-// which is then parsed by parse_manifest().
-esp_err_t http_get_request(void);
+// Parse the manifest JSON, capture useful metadata, and trigger OTA when a
+// newer firmware image is available.
+void parse_manifest(bool can_trigger_ota); 
+
+// If we successfully booted an OTA slot, mark it valid so ESP-IDF cancels any
+// pending rollback to the previous image.
+void validate_ota(void);
+
+#endif

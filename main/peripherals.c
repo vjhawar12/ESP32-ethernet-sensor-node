@@ -45,12 +45,12 @@
 #include "network.h"
 #include "sensors.h"
 #include "comms.h"
-#include "app_state.h"
 #include "ota.h"
 #include "http.h"
 #include "nvs.h"
 #include "periodic.h"
 #include "peripherals.h"
+#include "sensor_context.h"
 
 void gpio_init(void) {
 	gpio_config_t io_intr_conf = {
