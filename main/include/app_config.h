@@ -51,8 +51,8 @@
 // I2C port setup: change these later
 #define MASTER_SCL_GPIO GPIO_NUM_0
 #define MASTER_SDA_GPIO GPIO_NUM_1
-#define AHT20_SCL_GPIO GPIO_NUM_0
-#define AHT20_SDA_GPIO GPIO_NUM_1
+#define AHT20_SCL_GPIO GPIO_NUM_5
+#define AHT20_SDA_GPIO GPIO_NUM_6
 // from AHT20 datasheet
 #define AHT20_ADDR 0x38
 // Grounding A0-2 gives address 0x20
